@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Gamedev Canvas Workshop</title>
+  <style>
+    * { padding: 0; margin: 0; }
+    canvas { background: #eee; display: block; margin: 0 auto; }
+  </style>
+</head>
+<body>
+
+<h1 id="header" style="font-size:300%" align="center">Press Space To Play</h1>
+<p align="center">Press command-R to refresh...</p>
+<br />
+<div style="background-color:powderblue">
+	<p>Current Score</p>
+	<p id="scoreBox"></p>
+</div>
+
+
+
+<div style="background-color:lightpink">
+	<p>Current values of theta</p>
+	<p id="thetaInfo">filler</p>
+</div>
+
+<div style="background-color:azure">
+	<p>Current values of rodLength's</p>
+	<p id="rodLengthInfo">filler</p>
+	<!-- <p id="rawTheta">Raw Theta: </p> -->
+</div>
+
+<canvas id="myCanvas" width="700" height="360"></canvas>
+<script>
+	var spacePress = false;
+	document.addEventListener("keypress",spacePressHandler,false);
+	function spacePressHandler(e) {
+		if (e.which===32) {
+			if (spacePress===true) {
+				spacePress = false;
+				document.getElementById('header').innerHTML = "Press Space To Play";
+			} else {
+				spacePress = true;
+				document.getElementById('header').innerHTML = "Press Space To Pause";
+			}
+		}
+	}
+	// define my global vars here to setup the entire environment
+	var canvas = document.getElementById("myCanvas");
+
+	var ctx = canvas.getContext('2d');
+	var maxSpeed = 10;
+	var g = 10
+	const friction = 0.005
+	document.addEventListener("mousemove", mouseMoveHandler, false);
+
+
+	function drawJoint(jo) {
+		// """Uses joint object (jo) to represent the base, and all joints in pendulum system"""
+		ctx.beginPath();
+		ctx.arc(jo.x,jo.y,jo.radius, 0, Math.PI*2);
+		ctx.fillStyle = jo.color;
+		ctx.fill();
+		ctx.closePath();
+	}
+
+	function drawRod(jo1,jo2) {
+
+		ctx.beginPath();
+		ctx.moveTo(jo1.x,jo1.y);
+		ctx.lineTo(jo2.x,jo2.y);
+		ctx.fillStyle = 'black';
+		ctx.stroke();
+		ctx.closePath();
+	}
+
+	class Joint {
+		constructor(x,y,radius,rodLength,theta,color) {
+			this.x = x;
+			this.y = y;
+			this.radius = radius;
+			this.rodLength = rodLength;
+			this.color = color;
+			this.angular_v = 0;
+			this.theta = theta; 
+		    this.aX = 0;
+		    this.aY = 0;
+		    //its dumb to have both of the below, rather have a velocity history...
+		    this.lastPos = Array(3).fill(this.x);
+		    this.vX = 0;
+		    this.vY = 0;
+		}
+		getAcceleration() {
+			//only working for x right now.
+			var acc = this.x+this.lastPos[this.lastPos.length-2]-2*this.lastPos[this.lastPos.length-1]
+			acc *= 60 //this is a hack and should be fixed...
+			return acc
+		}
+	}
+
+	function mouseMoveHandler(e) {
+	    var relativeX = e.clientX - canvas.offsetLeft;
+	    if(relativeX > 0 && relativeX < canvas.width) {
+	      targetX = relativeX;
+	    }
+	}
+
+	function updateSimulation(currentTime) {
+
+		updateBase();
+		updatePendInertial(joints[1],joints[0])
+	}
+
+	function moveBase(baseX){
+		var X = baseX;
+		sign = Math.sign(targetX-X);
+		if (Math.abs(X-targetX) > maxSpeed) {
+			newX = X+maxSpeed*sign;
+			console.log('exceeded')
+		} else {
+			newX = targetX;
+		}
+		return newX
+	}
+	function updateBase(){
+		// this function is only for the base
+		base = joints[0];
+		base.lastPos.shift();
+		base.lastPos.push(base.x);
+		base.x = moveBase(base.x);	
+			
+		base.aX = base.getAcceleration();
+	}
+
+	function updatePend(jo,base){
+		// input a joint and it's relative base for this? I think that's a start at least.
+		tx = jo.x;
+		ty = jo.y;
+		px = base.x;
+		py = base.y;
+		r = jo.rodLength;
+		sine = (ty-py)/r
+		cose = (tx-px)/r
+		a = - base.aX;
+
+		tang_acc = -sine*a + cose*g
+		jo.angular_v += (tang_acc/r)/60.0
+		jo.angular_v *= (1-friction)
+		jo.theta = (2*Math.PI+(jo.theta+jo.angular_v))%(2*Math.PI)
+		jo.x = r*Math.cos(jo.theta)+px
+		jo.y = r*Math.sin(jo.theta)+py
+	}
+
+	function dot(v1,v2){
+		console.assert(v1.length === v2.length, [v1,v2]);
+		var running_sum = 0;
+		for (var i=0; i<v1.length; i++){
+			running_sum = running_sum + v1[i]*v2[i];
+		}
+		return running_sum
+	}
+
+	function updatePendInertial(jo,base){
+		//IN the end i think this method is inherently unstable as omega is somehow relatively too small
+		// compared to other terms, and thus you get diverging behavrior in XY that doesn't correct. As soon as x velocity has exceeded omega's
+		// constraint on it, it will not come back, as omega gets smaller and the x-component of acceleration gets smaller more slowly...
+
+		// Forcing pendullum length is nonsense unless i also constrain the velocity. I'll try that.
+		//Still omega**2*r is too small compared to ax... I could try just calculating omega = mag(velocity)/r, but i don't think even this would be enough (this would incidentally overestimate omega). 
+
+		//REAL ISSUE: I think the issue is more fundamental. simulating circular motion in an intertial reference frame really shouldn't work. the a_centripetal=a_c is always changing direction, CONTINUOUSLY, in real life. So modeling it as a constant acceleration over a short interval can be terrible if the interval is long enough. In the simulator x,y acc can be modeled as constant, but a_c cannot very well. I think it will always diverge from circle, no matter how small the timestep, as long as using some kind of fwd euler scheme. Converting [aX,aY] to polar [aR,aT] incidentally performs a geometric constraint that should mitigate the issue.
+		//Test of my sim: does my aR = 0 at all times? In the current setup it should. Then aT can be applied to get omega and omega applied as a constant over an interval. Even tho aC is not constant, omega can be approximated as such. 
+		//I think mine is buggier still. Removing gravity makes it look terrible...
+
+		//Still to do: Fix the timing equations to make it actually use the proper dt. Also will allow much faster sims (like 300 hz, which may help a lot) -- Instead of last positions, for base.acc, gotta do a velocity history. 
+		// Could solve for ax and ay, and then convert these to the polar coordinate system. Kinda wasteful, but better for the multipendulum and I would think nearly as accurate as doing the noninertial updatePendulum(). IDK.
+
+		//Honestly, I think I need to redo all of the math using the inverted coordinate system that canvas uses. Just to work out the bugs.
+		// SO: TO DO:
+		// 1. Redo approach with better timestep approach, allowing for faster simulation (and do this with the former scheme)
+		// 		a. Use velocity history too.
+		// 2. Once this works, redo the math for this approach and see if I can get it working better. If it does, but isn't perfect, try converting ax,ay to ar,at. 
+		// 3. Once this is working, try the double pendulumn.
+		tx = jo.x;
+		ty = jo.y;
+		px = base.x;
+		py = base.y;
+		// console.log("base xy",base.x,base.y)
+		r = jo.rodLength;
+		// console.log("r " , r)
+		sine = (ty-py)/r
+		cose = (tx-px)/r
+
+		// console.log('base acc', base.aX,base.aY)
+		aDot = dot([base.aX,base.aY],[cose,sine]);
+		// console.log("aDot ",aDot)
+		omegaSqr = Math.pow(jo.angular_v,2);
+		// console.log("omega_squred ",omegaSqr)
+		// aX = (g*sine + aDot - omegaSqr*r)*cose;
+		aX = (-g*sine + aDot - omegaSqr*r)*cose;
+		//This is to help debug the unstable x behavior...
+		console.log("g*sine, aDot, omegaSqr*r, cose", (g*sine).toFixed(3), aDot.toFixed(3), (omegaSqr*r).toFixed(3), (cose).toFixed(3))
+		// aY = (g*sine + aDot - omegaSqr*r)*sine - g;
+		aY = (-g*sine + aDot - omegaSqr*r)*sine + g;
+		aY = aY; //Gotta do this bc inverted coordinates. Dang those...
+		aX = aX; //Actually I still need to think more about this...
+		aX/=60;
+		aY/=60;
+		// console.log("aX aY = ",aX,aY)
+		jo.vX += aX;
+		jo.vY += aY;
+		// console.log("vX vY = ",jo.vX,jo.vY)
+		jo.x += jo.vX;
+		jo.y += jo.vY;
+		// console.log("jo.x, jo.y ",jo.x,jo.y)
+		// correctXY(jo,base); //terrible method. the velocity terms persist and continue to mess it up...
+		jo.rodLength = Math.sqrt(Math.pow((jo.x-base.x),2)+Math.pow((jo.y-base.y),2))
+		next_r = Math.sqrt(Math.pow((jo.x-base.x),2)+Math.pow((jo.y-base.y),2))
+
+		console.log("next r " , next_r)
+
+		//now update our angles and angular velocity
+		pastTheta = jo.theta;
+		// console.log('jo theta ',jo.theta)
+		//this line needs fixing...
+		// console.log((tx-px),(ty-py))
+		jo.theta = Math.atan2((jo.y-py),(jo.x-px)); //Idiot line. Didn't actually use updated... Helped, but didn't fix.
+		// console.log('jo theta ',jo.theta)
+		// correctV(jo)
+
+		if (jo.theta < 0) {
+			jo.theta = Math.PI+(Math.PI-(-jo.theta))
+		}
+		// console.log('jo theta ',jo.theta)
+		jo.angular_v = (jo.theta - pastTheta);
+	}
+
+	function correctXY(jo,base) {
+		relX = jo.x-base.x;
+		relY = jo.y - base.y;
+		mag = Math.sqrt((relX)**2+(relY)**2);
+		scale = jo.rodLength/mag;
+		relX = relX*scale;
+		relY = relY*scale;
+		jo.x = base.x+relX;
+		jo.y = base.y+relY;
+	}
+
+	function correctV(jo) {
+		angle = jo.theta+Math.PI/2;
+		jo.vX = jo.vX*Math.cos(angle);
+		jo.vY = jo.vY*Math.sin(angle);
+	}
+
+	function render() {
+		
+		ctx.clearRect(0, 0, canvas.width, canvas.height);
+		for (i = 0; i<joints.length-1; i++){
+			drawRod(joints[i],joints[i+1])
+		}
+		for (i=0; i<joints.length; i++) {
+			drawJoint(joints[i]);
+
+		}
+	} 
+
+	function updateInfo() {
+		thetaStr = '';
+		rodStr = '';
+		for (var i=1; i<joints.length; i++){
+			convertedTheta = Math.abs(joints[i].theta/(Math.PI*2)*360) 
+			convertedTheta = 360-convertedTheta
+			thetaStr += 'theta '+String(i)+' = '+String(convertedTheta);
+			rodStr += 'r'+String(i)+' = '+String(joints[i].rodLength)
+
+		}
+		document.getElementById("thetaInfo").innerHTML = thetaStr; 
+		document.getElementById("rodLengthInfo").innerHTML = rodStr; 
+		// document.getElementById("rawTheta").innerHTML = joints[1].theta; 
+	}
+	
+	var dt = 0.01
+	var radius = 5;
+	var rodLen = 100;
+	var startingTheta = Math.PI/2;
+	var jo0 = new Joint(canvas.width/2,canvas.height/2,radius,null,null,'blue');
+	var jo1 = new Joint(null,null,radius,rodLen,startingTheta,'red');
+	var joints = [jo0,jo1];
+
+	for (var i = 0; i<joints.length; i++) {
+		jo = joints[i];
+		if (i !== 0) {
+			jo.x = Math.cos(joints[i].theta)*joints[i].rodLength + joints[0].x;
+			jo.y = Math.sin(joints[i].theta)*joints[i].rodLength + joints[0].y;
+			console.log(jo.x,jo.y)
+		}
+	}
+
+	var targetX = joints[0].x
+
+
+	function animate(currentTime) {
+		if (spacePress) {
+			updateSimulation()
+		}
+		render();
+		updateInfo();
+		requestAnimationFrame(animate);
+	}
+	animate()
+</script>
+</body>
+</html>
+
